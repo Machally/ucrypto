@@ -2403,6 +2403,19 @@ MP_DEFINE_CONST_OBJ_TYPE(
     print, ecc_print,
     locals_dict, &ecc_locals_dict);
 
+/**
+ * Definição do tipo SignatureETH.
+ */
+static const mp_obj_type_t signature_eth_type = {
+    { &mp_type_type },
+    .name = MP_QSTR_SignatureETH,
+    .print = signature_eth_print,
+    .binary_op = signature_eth_binary_op,
+    .attr = signature_eth_attr,
+    .deinit = signature_eth_deinit, // Implementar se necessário
+    .locals_dict = (mp_obj_dict_t *)&signature_eth_locals_dict,
+};
+
 static const mp_rom_map_elem_t mp_module_ucrypto_globals_table[] = {
     {MP_OBJ_NEW_QSTR(MP_QSTR___name__), MP_OBJ_NEW_QSTR(MP_QSTR__crypto)},
     {MP_ROM_QSTR(MP_QSTR_ECC), MP_ROM_PTR(&ecc_type)},
@@ -2443,25 +2456,25 @@ static mp_obj_t signature_eth_attr(mp_obj_t obj, qstr attr, mp_obj_t *dest) {
     if (dest[0] == MP_OBJ_NULL) { // Load operation
         if (attr == MP_QSTR_r) {
             dest[0] = mp_obj_new_int_from_fp(self->ecdsa_signature_eth->r);
-            return;
+            return MP_OBJ_FROM_PTR(dest);
         }
         else if (attr == MP_QSTR_s) {
             dest[0] = mp_obj_new_int_from_fp(self->ecdsa_signature_eth->s);
-            return;
+            return MP_OBJ_FROM_PTR(dest);
         }
         else if (attr == MP_QSTR_v) {
             dest[0] = mp_obj_new_int(self->ecdsa_signature_eth->v);
-            return;
+            return MP_OBJ_FROM_PTR(dest);
         }
         else if (attr == MP_QSTR_chainId) {
             dest[0] = mp_obj_new_int(self->ecdsa_signature_eth->chainId);
-            return;
+            return MP_OBJ_FROM_PTR(dest);
         }
     }
-    // Store operation (atribuição)
-    // Não implementamos a modificação de atributos para segurança
+    // Store operation (atribuição) - Não implementado
     return MP_OBJ_NULL; // Indica que o atributo não foi tratado
 }
+
 
 /**
  * Operações binárias para SignatureETH.
@@ -2508,18 +2521,7 @@ static const mp_rom_map_elem_t signature_eth_locals_dict_table[] = {
 };
 static MP_DEFINE_CONST_DICT(signature_eth_locals_dict, signature_eth_locals_dict_table);
 
-/**
- * Definição do tipo SignatureETH.
- */
-static const mp_obj_type_t signature_eth_type = {
-    { &mp_type_type },
-    .name = MP_QSTR_SignatureETH,
-    .print = signature_eth_print,
-    .binary_op = signature_eth_binary_op,
-    .attr = signature_eth_attr,
-    .deinit = signature_eth_deinit, // Implementar se necessário
-    .locals_dict = (mp_obj_dict_t *)&signature_eth_locals_dict,
-};
+
 
 static void ec_point_sub(ecc_point_t *rop, ecc_point_t *op1, ecc_point_t *op2, ecc_curve_t *curve) {
     // Subtração de pontos: rop = op1 - op2
