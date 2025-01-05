@@ -617,6 +617,13 @@ typedef struct _ecdsa_signature_t
     fp_int *s;
 } ecdsa_signature_t;
 
+typedef struct _ecdsa_signature_teth {
+    fp_int *r;
+    fp_int *s;
+    int v; // Adiciona o parâmetro de recuperação
+    int chainId;
+} ecdsa_signature_teth;
+
 typedef struct _mp_curve_t
 {
     mp_obj_base_t base;
@@ -1631,6 +1638,21 @@ static int ecdsa_v(ecdsa_signature_t *sig, unsigned char *msg, size_t msg_len, e
     return equal;
 }
 
+/**
+ * Verifica a assinatura ECDSA compatível com Ethereum.
+ *
+ * @param sig_eth Assinatura Ethereum contendo r, s, v e chainId.
+ * @param msg     Mensagem assinada (hash Keccak-256).
+ * @param Q       Chave pública do signatário.
+ * @param curve   Curva elíptica utilizada.
+ * @return        True se a assinatura for válida, False caso contrário.
+ */
+static bool ecdsa_v_eth(ecdsa_signature_teth *sig_eth, unsigned char *msg, size_t msg_len, ecc_point_t *Q, ecc_curve_t *curve) {
+    // Reutiliza a lógica de verificação existente, ignorando chainId
+    return ecdsa_v((ecdsa_signature_t *)sig_eth, msg, msg_len, Q, curve);
+}
+
+
 static mp_obj_t point_equal(mp_obj_t point1, mp_obj_t point2)
 {
     if (!MP_OBJ_IS_TYPE(point1, &point_type))
@@ -1808,6 +1830,27 @@ static mp_obj_t signature(size_t n_args, const mp_obj_t *pos_args, mp_map_t *kw_
 static MP_DEFINE_CONST_FUN_OBJ_KW(signature_obj, 2, signature);
 static MP_DEFINE_CONST_STATICMETHOD_OBJ(static_signature_obj, MP_ROM_PTR(&signature_obj));
 
+/**
+ * Cria um novo objeto SignatureETH.
+ *
+ * @param r       Coordenada r da assinatura.
+ * @param s       Coordenada s da assinatura.
+ * @param v       Parâmetro de recuperação.
+ * @param chainId Identificador da cadeia Ethereum.
+ * @return        Objeto SignatureETH.
+ */
+static mp_obj_t signature_eth_new(fp_int *r, fp_int *s, int v, int chainId) {
+    mp_ecdsa_signature_eth_t *sig_eth = m_new_obj(mp_ecdsa_signature_eth_t);
+    sig_eth->base.type = &signature_eth_type;
+    sig_eth->ecdsa_signature_eth = m_new_obj(ecdsa_signature_teth);
+    sig_eth->ecdsa_signature_eth->r = r;
+    sig_eth->ecdsa_signature_eth->s = s;
+    sig_eth->ecdsa_signature_eth->v = v;
+    sig_eth->ecdsa_signature_eth->chainId = chainId;
+    return MP_OBJ_FROM_PTR(sig_eth);
+}
+
+
 static mp_obj_t ecdsa_sign(size_t n_args, const mp_obj_t *args)
 {
     (void)n_args;
@@ -1857,6 +1900,107 @@ static mp_obj_t ecdsa_sign(size_t n_args, const mp_obj_t *args)
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ecdsa_sign_obj, 4, 4, ecdsa_sign);
 static MP_DEFINE_CONST_STATICMETHOD_OBJ(static_ecdsa_sign_obj, MP_ROM_PTR(&ecdsa_sign_obj));
 
+/**
+ * Assina uma mensagem usando ECDSA compatível com Ethereum.
+ *
+ * @param n_args Número de argumentos.
+ * @param args    Vetor de argumentos: msg, d, curve, chainId.
+ * @return        Objeto SignatureETH contendo r, s e v.
+ */
+static mp_obj_t ecdsa_sign_eth(size_t n_args, const mp_obj_t *args) {
+    // Argumentos esperados: msg, d, curve, chainId
+    if (n_args < 4) {
+        mp_raise_TypeError(MP_ERROR_TEXT("ecdsa_sign_eth requires 4 arguments: msg, d, curve, chainId"));
+    }
+
+    mp_obj_t msg = args[0];
+    mp_obj_t d = args[1];
+    mp_obj_t curve = args[2];
+    mp_obj_t chainId_obj = args[3];
+
+    // Obter o buffer da mensagem (já deve ser o hash Keccak-256)
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(msg, &bufinfo, MP_BUFFER_READ);
+
+    // Validação dos tipos
+    if (!MP_OBJ_IS_INT(d)) {
+        mp_raise_msg_varg(&mp_type_TypeError, MP_ERROR_TEXT("Expected 'd' to be an int, got %s"), mp_obj_get_type_str(d));
+    }
+    if (!MP_OBJ_IS_TYPE(curve, &curve_type)) {
+        mp_raise_msg_varg(&mp_type_TypeError, MP_ERROR_TEXT("Expected 'curve' to be of type Curve, got %s"), mp_obj_get_type_str(curve));
+    }
+    if (!MP_OBJ_IS_INT(chainId_obj)) {
+        mp_raise_msg_varg(&mp_type_TypeError, MP_ERROR_TEXT("Expected 'chainId' to be an int, got %s"), mp_obj_get_type_str(chainId_obj));
+    }
+
+    int chainId = mp_obj_get_int(chainId_obj);
+    mp_curve_t *c = MP_OBJ_TO_PTR(curve);
+
+    // Converter a chave privada para fp_int
+    fp_int *d_fp_int = fp_alloc();
+    mp_fp_for_int(d, d_fp_int);
+
+    // Gerar nonce k usando RFC 6979 (externamente)
+    fp_int *k_fp_int = fp_alloc();
+    // TODO: Implementar a geração de nonce conforme o RFC 6979
+    // Por exemplo: generate_rfc6979_nonce(k_fp_int, c->ecc_curve->q, d_fp_int, bufinfo.buf, bufinfo.len);
+    // Aqui, assumimos que k_fp_int já está preenchido corretamente.
+
+    // Alocar a assinatura e o ponto R
+    ecdsa_signature_t *sig = m_new_obj(ecdsa_signature_t);
+    sig->r = fp_alloc();
+    sig->s = fp_alloc();
+
+    ecc_point_t *R = m_new_obj(ecc_point_t);
+    R->x = fp_alloc();
+    R->y = fp_alloc();
+
+    // Realizar a assinatura
+    ecdsa_s(sig, R, bufinfo.buf, bufinfo.len, *d_fp_int, *k_fp_int, c->ecc_curve);
+
+    // Normalizar s
+    fp_int *half_n = fp_alloc();
+    fp_div_2(c->ecc_curve->q, half_n);
+    int s_gt_half_n = fp_cmp(sig->s, half_n) == FP_GT;
+    if (s_gt_half_n) {
+        fp_sub(c->ecc_curve->q, sig->s, sig->s);
+    }
+    fp_free(half_n);
+
+    // Calcular o parâmetro v
+    int v = calculate_recovery_id(R, c->ecc_curve, chainId);
+    if (v == -1) {
+        // Liberar memória antes de levantar exceção
+        fp_free(d_fp_int);
+        fp_free(k_fp_int);
+        fp_free(sig->r);
+        fp_free(sig->s);
+        fp_free(R->x);
+        fp_free(R->y);
+        m_del_obj(ecc_point_t, R);
+        m_del_obj(ecdsa_signature_t, sig);
+        mp_raise_ValueError(MP_ERROR_TEXT("Failed to calculate recovery id"));
+    }
+
+    // Criar e retornar o objeto SignatureETH
+    mp_obj_t signature_eth = signature_eth_new(sig->r, sig->s, v, chainId);
+
+    // Liberar memória
+    fp_free(d_fp_int);
+    fp_free(k_fp_int);
+    fp_free(sig->r);
+    fp_free(sig->s);
+    m_del_obj(ecdsa_signature_t, sig);
+    fp_free(R->x);
+    fp_free(R->y);
+    m_del_obj(ecc_point_t, R);
+
+    return signature_eth;
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ecdsa_sign_eth_obj, 4, 4, ecdsa_sign_eth);
+
+
+
 static mp_obj_t ecdsa_verify(size_t n_args, const mp_obj_t *args)
 {
     (void)n_args;
@@ -1888,6 +2032,49 @@ static mp_obj_t ecdsa_verify(size_t n_args, const mp_obj_t *args)
 
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ecdsa_verify_obj, 4, 4, ecdsa_verify);
 static MP_DEFINE_CONST_STATICMETHOD_OBJ(static_ecdsa_verify_obj, MP_ROM_PTR(&ecdsa_verify_obj));
+
+/**
+ * Verifica uma assinatura Ethereum ECDSA.
+ *
+ * @param n_args Número de argumentos.
+ * @param args    Vetor de argumentos: signature_eth, msg, Q, curve.
+ * @return        True se a assinatura for válida, False caso contrário.
+ */
+static mp_obj_t ecdsa_verify_eth(size_t n_args, const mp_obj_t *args) {
+    // Argumentos esperados: signature_eth, msg, Q, curve
+    if (n_args < 4) {
+        mp_raise_TypeError(MP_ERROR_TEXT("ecdsa_verify_eth requires 4 arguments: signature_eth, msg, Q, curve"));
+    }
+
+    mp_obj_t signature_eth = args[0];
+    mp_obj_t msg = args[1];
+    mp_obj_t Q = args[2];
+    mp_obj_t curve = args[3];
+
+    // Validação dos tipos
+    if (!MP_OBJ_IS_TYPE(signature_eth, &signature_eth_type)) {
+        mp_raise_msg_varg(&mp_type_TypeError, MP_ERROR_TEXT("Expected 'signature_eth' to be of type SignatureETH, got %s"), mp_obj_get_type_str(signature_eth));
+    }
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(msg, &bufinfo, MP_BUFFER_READ);
+    if (!MP_OBJ_IS_TYPE(Q, &point_type)) {
+        mp_raise_msg_varg(&mp_type_TypeError, MP_ERROR_TEXT("Expected 'Q' to be of type Point, got %s"), mp_obj_get_type_str(Q));
+    }
+    if (!MP_OBJ_IS_TYPE(curve, &curve_type)) {
+        mp_raise_msg_varg(&mp_type_TypeError, MP_ERROR_TEXT("Expected 'curve' to be of type Curve, got %s"), mp_obj_get_type_str(curve));
+    }
+
+    mp_ecdsa_signature_eth_t *s_eth = MP_OBJ_TO_PTR(signature_eth);
+    mp_point_t *q = MP_OBJ_TO_PTR(Q);
+    mp_curve_t *c = MP_OBJ_TO_PTR(curve);
+
+    bool is_valid = ecdsa_v_eth(s_eth->ecdsa_signature_eth, bufinfo.buf, bufinfo.len, q->ecc_point, c->ecc_curve);
+
+    return mp_obj_new_bool(is_valid);
+}
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ecdsa_verify_eth_obj, 4, 4, ecdsa_verify_eth);
+
+
 
 static void point_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind)
 {
@@ -2220,6 +2407,9 @@ static const mp_rom_map_elem_t mp_module_ucrypto_globals_table[] = {
     {MP_OBJ_NEW_QSTR(MP_QSTR___name__), MP_OBJ_NEW_QSTR(MP_QSTR__crypto)},
     {MP_ROM_QSTR(MP_QSTR_ECC), MP_ROM_PTR(&ecc_type)},
     {MP_ROM_QSTR(MP_QSTR_NUMBER), MP_ROM_PTR(&number_type)},
+    {MP_ROM_QSTR(MP_QSTR_SignatureETH), MP_ROM_PTR(&signature_eth_type)},
+    {MP_ROM_QSTR(MP_QSTR_ecdsa_sign_eth), MP_ROM_PTR(&ecdsa_sign_eth_obj)},
+    {MP_ROM_QSTR(MP_QSTR_ecdsa_verify_eth), MP_ROM_PTR(&ecdsa_verify_eth_obj)},
 };
 
 static MP_DEFINE_CONST_DICT(mp_module_ucrypto_globals, mp_module_ucrypto_globals_table);
@@ -2231,3 +2421,161 @@ const mp_obj_module_t mp_module_ucrypto = {
 
 // Register the module to make it available in Python
 MP_REGISTER_MODULE(MP_QSTR__crypto, mp_module_ucrypto);
+
+/**
+ * Impressão do objeto SignatureETH.
+ */
+static void signature_eth_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
+    (void)kind;
+    mp_ecdsa_signature_eth_t *self = MP_OBJ_TO_PTR(self_in);
+    vstr_t *vstr_r = vstr_new_from_fp(self->ecdsa_signature_eth->r);
+    vstr_t *vstr_s = vstr_new_from_fp(self->ecdsa_signature_eth->s);
+    mp_printf(print, "<SignatureETH r=%s s=%s v=%d chainId=%d>", vstr_str(vstr_r), vstr_str(vstr_s), self->ecdsa_signature_eth->v, self->ecdsa_signature_eth->chainId);
+    vstr_free(vstr_r);
+    vstr_free(vstr_s);
+}
+
+/**
+ * Atributos do objeto SignatureETH.
+ */
+static mp_obj_t signature_eth_attr(mp_obj_t obj, qstr attr, mp_obj_t *dest) {
+    mp_ecdsa_signature_eth_t *self = MP_OBJ_TO_PTR(obj);
+    if (dest[0] == MP_OBJ_NULL) { // Load operation
+        if (attr == MP_QSTR_r) {
+            dest[0] = mp_obj_new_int_from_fp(self->ecdsa_signature_eth->r);
+            return;
+        }
+        else if (attr == MP_QSTR_s) {
+            dest[0] = mp_obj_new_int_from_fp(self->ecdsa_signature_eth->s);
+            return;
+        }
+        else if (attr == MP_QSTR_v) {
+            dest[0] = mp_obj_new_int(self->ecdsa_signature_eth->v);
+            return;
+        }
+        else if (attr == MP_QSTR_chainId) {
+            dest[0] = mp_obj_new_int(self->ecdsa_signature_eth->chainId);
+            return;
+        }
+    }
+    // Store operation (atribuição)
+    // Não implementamos a modificação de atributos para segurança
+    return MP_OBJ_NULL; // Indica que o atributo não foi tratado
+}
+
+/**
+ * Operações binárias para SignatureETH.
+ */
+static bool signature_eth_equal(ecdsa_signature_teth *s1, ecdsa_signature_teth *s2) {
+    if (fp_cmp(s1->r, s2->r) != FP_EQ) {
+        return false;
+    }
+    if (fp_cmp(s1->s, s2->s) != FP_EQ) {
+        return false;
+    }
+    if (s1->v != s2->v) {
+        return false;
+    }
+    if (s1->chainId != s2->chainId) {
+        return false;
+    }
+    return true;
+}
+
+static mp_obj_t signature_eth_binary_op(mp_binary_op_t op, mp_obj_t lhs, mp_obj_t rhs) {
+    switch (op) {
+        case MP_BINARY_OP_EQUAL: {
+            if (!MP_OBJ_IS_TYPE(lhs, &signature_eth_type) || !MP_OBJ_IS_TYPE(rhs, &signature_eth_type)) {
+                mp_raise_TypeError(MP_ERROR_TEXT("Both objects must be SignatureETH"));
+            }
+            mp_ecdsa_signature_eth_t *l = MP_OBJ_TO_PTR(lhs);
+            mp_ecdsa_signature_eth_t *r = MP_OBJ_TO_PTR(rhs);
+            return mp_obj_new_bool(signature_eth_equal(l->ecdsa_signature_eth, r->ecdsa_signature_eth));
+        }
+        default:
+            return MP_OBJ_NULL; // Operação não suportada
+    }
+}
+
+/**
+ * Dicionário local do objeto SignatureETH.
+ */
+static const mp_rom_map_elem_t signature_eth_locals_dict_table[] = {
+    {MP_ROM_QSTR(MP_QSTR_r), MP_ROM_PTR(&mp_type_int)},
+    {MP_ROM_QSTR(MP_QSTR_s), MP_ROM_PTR(&mp_type_int)},
+    {MP_ROM_QSTR(MP_QSTR_v), MP_ROM_PTR(&mp_type_int)},
+    {MP_ROM_QSTR(MP_QSTR_chainId), MP_ROM_PTR(&mp_type_int)},
+};
+static MP_DEFINE_CONST_DICT(signature_eth_locals_dict, signature_eth_locals_dict_table);
+
+/**
+ * Definição do tipo SignatureETH.
+ */
+static const mp_obj_type_t signature_eth_type = {
+    { &mp_type_type },
+    .name = MP_QSTR_SignatureETH,
+    .print = signature_eth_print,
+    .binary_op = signature_eth_binary_op,
+    .attr = signature_eth_attr,
+    .deinit = signature_eth_deinit, // Implementar se necessário
+    .locals_dict = (mp_obj_dict_t *)&signature_eth_locals_dict,
+};
+
+static void ec_point_sub(ecc_point_t *rop, ecc_point_t *op1, ecc_point_t *op2, ecc_curve_t *curve) {
+    // Subtração de pontos: rop = op1 - op2
+    // rop = op1 + (-op2)
+    
+    // Criar ponto -op2
+    ecc_point_t *neg_op2 = m_new_obj(ecc_point_t);
+    neg_op2->x = fp_alloc();
+    neg_op2->y = fp_alloc();
+    fp_copy(op2->x, neg_op2->x);
+    fp_neg(op2->y, neg_op2->y);
+    fp_mod(neg_op2->y, curve->p, neg_op2->y);
+    
+    // Adicionar op1 + (-op2)
+    ec_point_add(rop, op1, neg_op2, curve);
+    
+    // Limpeza
+    fp_free(neg_op2->x);
+    fp_free(neg_op2->y);
+    m_del_obj(ecc_point_t, neg_op2);
+}
+
+static void signature_eth_deinit(mp_obj_t self_in) {
+    mp_ecdsa_signature_eth_t *self = MP_OBJ_TO_PTR(self_in);
+    fp_free(self->ecdsa_signature_eth->r);
+    fp_free(self->ecdsa_signature_eth->s);
+    m_del_obj(ecdsa_signature_teth, self->ecdsa_signature_eth);
+    m_del_obj(mp_ecdsa_signature_eth_t, self);
+}
+
+/**
+ * Calcula o parâmetro de recuperação `v` para assinaturas ECDSA compatíveis com Ethereum.
+ *
+ * @param R      Ponto R resultante de k * G na curva elíptica.
+ * @param curve  Curva elíptica utilizada.
+ * @param chainId Identificador da cadeia Ethereum (genérico).
+ * @return       Valor de `v` calculado (27 + rec_id + chainId * 2).
+ */
+static int calculate_recovery_id(ecc_point_t *R, ecc_curve_t *curve, int chainId) {
+    // Verifica se o ponto R está no ponto de identidade
+    if (fp_iszero(R->x) && fp_iszero(R->y)) {
+        // Não é possível recuperar a chave pública a partir do ponto de identidade
+        return -1;
+    }
+
+    // Determina a paridade de y(R)
+    int rec_id = fp_tstbit(R->y, 0) ? 1 : 0; // 1 se y(R) é ímpar, 0 se par
+
+    // Calcula v conforme EIP-155: v = rec_id + (chainId * 2 + 35)
+    // Onde rec_id é 0 ou 1
+    int v = rec_id + (chainId * 2) + 35;
+
+    return v;
+}
+
+
+
+
+
