@@ -66,6 +66,8 @@
 #define ERROR_RIGHT_EXPECTED_INT MP_ERROR_TEXT("right must be a int")
 #define ERROR_MEMORY MP_ERROR_TEXT("memory allocation failed, allocating %u bytes")
 
+static int calculate_recovery_id(ecc_point_t *R, ecc_curve_t *curve, int chainId);
+
 static vstr_t *vstr_unhexlify(vstr_t *vstr_out, const byte *in, size_t in_len)
 {
     if ((in_len & 1) != 0)
@@ -643,7 +645,13 @@ typedef struct _mp_ecdsa_signature_t
     ecdsa_signature_t *ecdsa_signature;
 } mp_ecdsa_signature_t;
 
-const mp_obj_type_t signature_type;
+
+typedef struct _mp_ecdsa_signature_eth_t {
+    mp_obj_base_t base;
+    ecdsa_signature_teth *ecdsa_signature_eth;
+} mp_ecdsa_signature_eth_t;
+
+//const mp_obj_type_t signature_type;
 const mp_obj_type_t curve_type;
 const mp_obj_type_t point_type;
 const mp_obj_type_t ecc_type;
@@ -1648,10 +1656,12 @@ static int ecdsa_v(ecdsa_signature_t *sig, unsigned char *msg, size_t msg_len, e
  * @return        True se a assinatura for válida, False caso contrário.
  */
 static bool ecdsa_v_eth(ecdsa_signature_teth *sig_eth, unsigned char *msg, size_t msg_len, ecc_point_t *Q, ecc_curve_t *curve) {
-    // Reutiliza a lógica de verificação existente, ignorando chainId
-    return ecdsa_v((ecdsa_signature_t *)sig_eth, msg, msg_len, Q, curve);
+    // Cria uma assinatura padrão temporária
+    ecdsa_signature_t sig_standard;
+    sig_standard.r = sig_eth->r;
+    sig_standard.s = sig_eth->s;
+    return ecdsa_v(&sig_standard, msg, msg_len, Q, curve);
 }
-
 
 static mp_obj_t point_equal(mp_obj_t point1, mp_obj_t point2)
 {
@@ -1904,19 +1914,20 @@ static MP_DEFINE_CONST_STATICMETHOD_OBJ(static_ecdsa_sign_obj, MP_ROM_PTR(&ecdsa
  * Assina uma mensagem usando ECDSA compatível com Ethereum.
  *
  * @param n_args Número de argumentos.
- * @param args    Vetor de argumentos: msg, d, curve, chainId.
+ * @param args    Vetor de argumentos: msg, d, k, curve, chainId.
  * @return        Objeto SignatureETH contendo r, s e v.
  */
 static mp_obj_t ecdsa_sign_eth(size_t n_args, const mp_obj_t *args) {
-    // Argumentos esperados: msg, d, curve, chainId
-    if (n_args < 4) {
-        mp_raise_TypeError(MP_ERROR_TEXT("ecdsa_sign_eth requires 4 arguments: msg, d, curve, chainId"));
+    // Argumentos esperados: msg, d, k, curve, chainId
+    if (n_args < 5) {
+        mp_raise_TypeError(MP_ERROR_TEXT("ecdsa_sign_eth requires 5 arguments: msg, d, k, curve, chainId"));
     }
 
     mp_obj_t msg = args[0];
     mp_obj_t d = args[1];
-    mp_obj_t curve = args[2];
-    mp_obj_t chainId_obj = args[3];
+    mp_obj_t k = args[2];
+    mp_obj_t curve = args[3];
+    mp_obj_t chainId_obj = args[4];
 
     // Obter o buffer da mensagem (já deve ser o hash Keccak-256)
     mp_buffer_info_t bufinfo;
@@ -1925,6 +1936,9 @@ static mp_obj_t ecdsa_sign_eth(size_t n_args, const mp_obj_t *args) {
     // Validação dos tipos
     if (!MP_OBJ_IS_INT(d)) {
         mp_raise_msg_varg(&mp_type_TypeError, MP_ERROR_TEXT("Expected 'd' to be an int, got %s"), mp_obj_get_type_str(d));
+    }
+    if (!MP_OBJ_IS_INT(k)) {
+        mp_raise_msg_varg(&mp_type_TypeError, MP_ERROR_TEXT("Expected 'k' to be an int, got %s"), mp_obj_get_type_str(k));
     }
     if (!MP_OBJ_IS_TYPE(curve, &curve_type)) {
         mp_raise_msg_varg(&mp_type_TypeError, MP_ERROR_TEXT("Expected 'curve' to be of type Curve, got %s"), mp_obj_get_type_str(curve));
@@ -1940,11 +1954,9 @@ static mp_obj_t ecdsa_sign_eth(size_t n_args, const mp_obj_t *args) {
     fp_int *d_fp_int = fp_alloc();
     mp_fp_for_int(d, d_fp_int);
 
-    // Gerar nonce k usando RFC 6979 (externamente)
+    // Converter k para fp_int
     fp_int *k_fp_int = fp_alloc();
-    // TODO: Implementar a geração de nonce conforme o RFC 6979
-    // Por exemplo: generate_rfc6979_nonce(k_fp_int, c->ecc_curve->q, d_fp_int, bufinfo.buf, bufinfo.len);
-    // Aqui, assumimos que k_fp_int já está preenchido corretamente.
+    mp_fp_for_int(k, k_fp_int);
 
     // Alocar a assinatura e o ponto R
     ecdsa_signature_t *sig = m_new_obj(ecdsa_signature_t);
@@ -1956,7 +1968,7 @@ static mp_obj_t ecdsa_sign_eth(size_t n_args, const mp_obj_t *args) {
     R->y = fp_alloc();
 
     // Realizar a assinatura
-    ecdsa_s(sig, R, bufinfo.buf, bufinfo.len, *d_fp_int, *k_fp_int, c->ecc_curve);
+    ecdsa_s(sig, bufinfo.buf, bufinfo.len, *d_fp_int, *k_fp_int, c->ecc_curve);
 
     // Normalizar s
     fp_int *half_n = fp_alloc();
@@ -1997,7 +2009,8 @@ static mp_obj_t ecdsa_sign_eth(size_t n_args, const mp_obj_t *args) {
 
     return signature_eth;
 }
-static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ecdsa_sign_eth_obj, 4, 4, ecdsa_sign_eth);
+static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ecdsa_sign_eth_obj, 5, 5, ecdsa_sign_eth);
+
 
 
 
@@ -2379,6 +2392,14 @@ static void ecc_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t
     mp_printf(print, mp_obj_get_type_str(self_in));
 }
 
+static void signature_eth_deinit(mp_obj_t self_in) {
+    mp_ecdsa_signature_eth_t *self = MP_OBJ_TO_PTR(self_in);
+    fp_free(self->ecdsa_signature_eth->r);
+    fp_free(self->ecdsa_signature_eth->s);
+    m_del_obj(ecdsa_signature_teth, self->ecdsa_signature_eth);
+    m_del_obj(mp_ecdsa_signature_eth_t, self);
+}
+
 static const mp_rom_map_elem_t ecc_locals_dict_table[] = {
     {MP_ROM_QSTR(MP_QSTR_Point), MP_ROM_PTR(&static_point_obj)},
     {MP_ROM_QSTR(MP_QSTR_point_equal), MP_ROM_PTR(&static_point_equal_obj)},
@@ -2544,13 +2565,7 @@ static void ec_point_sub(ecc_point_t *rop, ecc_point_t *op1, ecc_point_t *op2, e
     m_del_obj(ecc_point_t, neg_op2);
 }
 
-static void signature_eth_deinit(mp_obj_t self_in) {
-    mp_ecdsa_signature_eth_t *self = MP_OBJ_TO_PTR(self_in);
-    fp_free(self->ecdsa_signature_eth->r);
-    fp_free(self->ecdsa_signature_eth->s);
-    m_del_obj(ecdsa_signature_teth, self->ecdsa_signature_eth);
-    m_del_obj(mp_ecdsa_signature_eth_t, self);
-}
+
 
 /**
  * Calcula o parâmetro de recuperação `v` para assinaturas ECDSA compatíveis com Ethereum.
