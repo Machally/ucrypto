@@ -66,7 +66,7 @@
 #define ERROR_RIGHT_EXPECTED_INT MP_ERROR_TEXT("right must be a int")
 #define ERROR_MEMORY MP_ERROR_TEXT("memory allocation failed, allocating %u bytes")
 
-static int calculate_recovery_id(ecc_point_t *R, ecc_curve_t *curve, int chainId);
+
 
 static vstr_t *vstr_unhexlify(vstr_t *vstr_out, const byte *in, size_t in_len)
 {
@@ -651,10 +651,34 @@ typedef struct _mp_ecdsa_signature_eth_t {
     ecdsa_signature_teth *ecdsa_signature_eth;
 } mp_ecdsa_signature_eth_t;
 
-//const mp_obj_type_t signature_type;
+const mp_obj_type_t signature_type;
+const mp_obj_type_t signature_eth_type;
 const mp_obj_type_t curve_type;
 const mp_obj_type_t point_type;
 const mp_obj_type_t ecc_type;
+
+
+// Prototipagem das funções
+static void signature_eth_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind);
+static mp_obj_t signature_eth_binary_op(mp_binary_op_t op, mp_obj_t lhs, mp_obj_t rhs);
+static mp_obj_t signature_eth_attr(mp_obj_t obj, qstr attr, mp_obj_t *dest);
+//static void signature_eth_deinit(mp_obj_t self_in);
+
+
+
+/**
+ * Impressão do objeto SignatureETH.
+ */
+static void signature_eth_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
+    (void)kind;
+    mp_ecdsa_signature_eth_t *self = MP_OBJ_TO_PTR(self_in);
+    vstr_t *vstr_r = vstr_new_from_fp(self->ecdsa_signature_eth->r);
+    vstr_t *vstr_s = vstr_new_from_fp(self->ecdsa_signature_eth->s);
+    mp_printf(print, "<SignatureETH r=%s s=%s v_eth=%d chainId=%d>", vstr_str(vstr_r), vstr_str(vstr_s), self->ecdsa_signature_eth->v, self->ecdsa_signature_eth->chainId);
+    vstr_free(vstr_r);
+    vstr_free(vstr_s);
+}
+
 
 static mp_curve_t *new_curve_init_copy(mp_point_t *point)
 {
@@ -785,6 +809,32 @@ static void signature_attr(mp_obj_t obj, qstr attr, mp_obj_t *dest)
     }
 }
 
+
+/**
+ * Calcula o parâmetro de recuperação `v` para assinaturas ECDSA compatíveis com Ethereum.
+ *
+ * @param R      Ponto R resultante de k * G na curva elíptica.
+ * @param curve  Curva elíptica utilizada.
+ * @param chainId Identificador da cadeia Ethereum (genérico).
+ * @return       Valor de `v` calculado (27 + rec_id + chainId * 2).
+ */
+static int calculate_recovery_id(ecc_point_t *R, ecc_curve_t *curve, int chainId) {
+    // Verifica se o ponto R está no ponto de identidade
+    if (fp_iszero(R->x) && fp_iszero(R->y)) {
+        // Não é possível recuperar a chave pública a partir do ponto de identidade
+        return -1;
+    }
+
+    // Determina a paridade de y(R)
+    int rec_id = fp_tstbit(*R->y, 0) ? 1 : 0; // 1 se y(R) é ímpar, 0 se par
+
+    // Calcula v conforme EIP-155: v = rec_id + (chainId * 2 + 35)
+    // Onde rec_id é 0 ou 1
+    int v = rec_id + (chainId * 2) + 35;
+
+    return v;
+}
+
 static const mp_rom_map_elem_t signature_locals_dict_table[] = {
     {MP_ROM_QSTR(MP_QSTR_s), MP_ROM_INT(0)},
     {MP_ROM_QSTR(MP_QSTR_r), MP_ROM_INT(0)},
@@ -800,6 +850,29 @@ MP_DEFINE_CONST_OBJ_TYPE(
     binary_op, signature_binary_op,
     attr, signature_attr,
     locals_dict, &signature_locals_dict);
+
+
+/**
+ * Definição do tipo SignatureETH.
+ */
+
+static const mp_rom_map_elem_t signature_eth_locals_dict_table[] = {
+    {MP_ROM_QSTR(MP_QSTR_r), MP_ROM_PTR(&mp_type_int)},
+    {MP_ROM_QSTR(MP_QSTR_s), MP_ROM_PTR(&mp_type_int)},
+    {MP_ROM_QSTR(MP_QSTR_v_eth), MP_ROM_PTR(&mp_type_int)},
+    {MP_ROM_QSTR(MP_QSTR_chainId), MP_ROM_PTR(&mp_type_int)},
+};
+static MP_DEFINE_CONST_DICT(signature_eth_locals_dict, signature_eth_locals_dict_table);
+
+ 
+MP_DEFINE_CONST_OBJ_TYPE(
+    signature_eth_type,
+    MP_QSTR_SignatureETH,
+    MP_TYPE_FLAG_NONE,
+    print, signature_eth_print,
+    binary_op, signature_eth_binary_op,
+    attr, signature_eth_attr,
+    locals_dict, &signature_eth_locals_dict);
 
 static bool ec_point_in_curve(ecc_point_t *point, ecc_curve_t *curve)
 {
@@ -1599,6 +1672,55 @@ static void ecdsa_s(ecdsa_signature_t *sig, unsigned char *msg, size_t msg_len, 
     m_del_obj(ecc_point_t, R);
 }
 
+static void ecdsa_s_eth(ecdsa_signature_t *sig, unsigned char *msg, size_t msg_len, fp_int d, fp_int k, ecc_curve_t *curve, ecc_point_t *R_out)
+{
+    fp_int *e = fp_alloc();
+    fp_int *kinv = fp_alloc();
+
+    // R = k * G, r = R[x]
+    ecc_point_t *R = m_new_obj(ecc_point_t);
+    R->x = fp_alloc();
+    R->y = fp_alloc();
+
+    ec_point_mul(R, curve->g, k, curve);
+    fp_copy(R->x, sig->r);
+    fp_mod(sig->r, curve->q, sig->r);
+
+    // Converter digest para inteiro (digest é computado como hex em ecdsa.py)
+    fp_read_radix(e, (const char *)msg, 16);
+
+    int orderBits = fp_count_bits(curve->q);
+    int digestBits = msg_len * 4;
+
+    if (digestBits > orderBits) {
+        fp_int *n = fp_alloc();
+        fp_2expt(n, digestBits - orderBits);
+        fp_div(e, n, e, NULL);
+        fp_free(n);
+    }
+
+    // s = (k^-1 * (e + d * r)) mod n
+    fp_invmod(&k, curve->q, kinv);
+    fp_zero(sig->s);
+
+    fp_mul(&d, sig->r, sig->s);
+    fp_add(sig->s, e, sig->s);
+    fp_mul(sig->s, kinv, sig->s);
+    fp_mod(sig->s, curve->q, sig->s);
+
+    // Copiar R para R_out
+    fp_copy(R->x, R_out->x);
+    fp_copy(R->y, R_out->y);
+
+    // Liberação de memória
+    fp_free(e);
+    fp_free(kinv);
+
+    fp_free(R->x);
+    fp_free(R->y);
+    m_del_obj(ecc_point_t, R);
+}
+
 static int ecdsa_v(ecdsa_signature_t *sig, unsigned char *msg, size_t msg_len, ecc_point_t *Q, ecc_curve_t *curve)
 {
     fp_int *e = fp_alloc();
@@ -1968,7 +2090,7 @@ static mp_obj_t ecdsa_sign_eth(size_t n_args, const mp_obj_t *args) {
     R->y = fp_alloc();
 
     // Realizar a assinatura
-    ecdsa_s(sig, bufinfo.buf, bufinfo.len, *d_fp_int, *k_fp_int, c->ecc_curve);
+    ecdsa_s_eth(sig, bufinfo.buf, bufinfo.len, *d_fp_int, *k_fp_int, c->ecc_curve, R);
 
     // Normalizar s
     fp_int *half_n = fp_alloc();
@@ -2010,7 +2132,7 @@ static mp_obj_t ecdsa_sign_eth(size_t n_args, const mp_obj_t *args) {
     return signature_eth;
 }
 static MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(ecdsa_sign_eth_obj, 5, 5, ecdsa_sign_eth);
-
+//static MP_DEFINE_CONST_STATICMETHOD_OBJ(static_ecdsa_sign_eth_obj, MP_ROM_PTR(&ecdsa_sign_eth_obj));
 
 
 
@@ -2392,13 +2514,13 @@ static void ecc_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t
     mp_printf(print, mp_obj_get_type_str(self_in));
 }
 
-static void signature_eth_deinit(mp_obj_t self_in) {
+/* static void signature_eth_deinit(mp_obj_t self_in) {
     mp_ecdsa_signature_eth_t *self = MP_OBJ_TO_PTR(self_in);
     fp_free(self->ecdsa_signature_eth->r);
     fp_free(self->ecdsa_signature_eth->s);
     m_del_obj(ecdsa_signature_teth, self->ecdsa_signature_eth);
     m_del_obj(mp_ecdsa_signature_eth_t, self);
-}
+} */
 
 static const mp_rom_map_elem_t ecc_locals_dict_table[] = {
     {MP_ROM_QSTR(MP_QSTR_Point), MP_ROM_PTR(&static_point_obj)},
@@ -2424,18 +2546,6 @@ MP_DEFINE_CONST_OBJ_TYPE(
     print, ecc_print,
     locals_dict, &ecc_locals_dict);
 
-/**
- * Definição do tipo SignatureETH.
- */
-static const mp_obj_type_t signature_eth_type = {
-    { &mp_type_type },
-    .name = MP_QSTR_SignatureETH,
-    .print = signature_eth_print,
-    .binary_op = signature_eth_binary_op,
-    .attr = signature_eth_attr,
-    .deinit = signature_eth_deinit, // Implementar se necessário
-    .locals_dict = (mp_obj_dict_t *)&signature_eth_locals_dict,
-};
 
 static const mp_rom_map_elem_t mp_module_ucrypto_globals_table[] = {
     {MP_OBJ_NEW_QSTR(MP_QSTR___name__), MP_OBJ_NEW_QSTR(MP_QSTR__crypto)},
@@ -2456,18 +2566,7 @@ const mp_obj_module_t mp_module_ucrypto = {
 // Register the module to make it available in Python
 MP_REGISTER_MODULE(MP_QSTR__crypto, mp_module_ucrypto);
 
-/**
- * Impressão do objeto SignatureETH.
- */
-static void signature_eth_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
-    (void)kind;
-    mp_ecdsa_signature_eth_t *self = MP_OBJ_TO_PTR(self_in);
-    vstr_t *vstr_r = vstr_new_from_fp(self->ecdsa_signature_eth->r);
-    vstr_t *vstr_s = vstr_new_from_fp(self->ecdsa_signature_eth->s);
-    mp_printf(print, "<SignatureETH r=%s s=%s v=%d chainId=%d>", vstr_str(vstr_r), vstr_str(vstr_s), self->ecdsa_signature_eth->v, self->ecdsa_signature_eth->chainId);
-    vstr_free(vstr_r);
-    vstr_free(vstr_s);
-}
+
 
 /**
  * Atributos do objeto SignatureETH.
@@ -2483,7 +2582,7 @@ static mp_obj_t signature_eth_attr(mp_obj_t obj, qstr attr, mp_obj_t *dest) {
             dest[0] = mp_obj_new_int_from_fp(self->ecdsa_signature_eth->s);
             return MP_OBJ_FROM_PTR(dest);
         }
-        else if (attr == MP_QSTR_v) {
+        else if (attr == MP_QSTR_v_eth) {
             dest[0] = mp_obj_new_int(self->ecdsa_signature_eth->v);
             return MP_OBJ_FROM_PTR(dest);
         }
@@ -2531,20 +2630,9 @@ static mp_obj_t signature_eth_binary_op(mp_binary_op_t op, mp_obj_t lhs, mp_obj_
     }
 }
 
-/**
- * Dicionário local do objeto SignatureETH.
- */
-static const mp_rom_map_elem_t signature_eth_locals_dict_table[] = {
-    {MP_ROM_QSTR(MP_QSTR_r), MP_ROM_PTR(&mp_type_int)},
-    {MP_ROM_QSTR(MP_QSTR_s), MP_ROM_PTR(&mp_type_int)},
-    {MP_ROM_QSTR(MP_QSTR_v), MP_ROM_PTR(&mp_type_int)},
-    {MP_ROM_QSTR(MP_QSTR_chainId), MP_ROM_PTR(&mp_type_int)},
-};
-static MP_DEFINE_CONST_DICT(signature_eth_locals_dict, signature_eth_locals_dict_table);
 
 
-
-static void ec_point_sub(ecc_point_t *rop, ecc_point_t *op1, ecc_point_t *op2, ecc_curve_t *curve) {
+/* static void ec_point_sub(ecc_point_t *rop, ecc_point_t *op1, ecc_point_t *op2, ecc_curve_t *curve) {
     // Subtração de pontos: rop = op1 - op2
     // rop = op1 + (-op2)
     
@@ -2563,34 +2651,10 @@ static void ec_point_sub(ecc_point_t *rop, ecc_point_t *op1, ecc_point_t *op2, e
     fp_free(neg_op2->x);
     fp_free(neg_op2->y);
     m_del_obj(ecc_point_t, neg_op2);
-}
+} */
 
 
 
-/**
- * Calcula o parâmetro de recuperação `v` para assinaturas ECDSA compatíveis com Ethereum.
- *
- * @param R      Ponto R resultante de k * G na curva elíptica.
- * @param curve  Curva elíptica utilizada.
- * @param chainId Identificador da cadeia Ethereum (genérico).
- * @return       Valor de `v` calculado (27 + rec_id + chainId * 2).
- */
-static int calculate_recovery_id(ecc_point_t *R, ecc_curve_t *curve, int chainId) {
-    // Verifica se o ponto R está no ponto de identidade
-    if (fp_iszero(R->x) && fp_iszero(R->y)) {
-        // Não é possível recuperar a chave pública a partir do ponto de identidade
-        return -1;
-    }
-
-    // Determina a paridade de y(R)
-    int rec_id = fp_tstbit(R->y, 0) ? 1 : 0; // 1 se y(R) é ímpar, 0 se par
-
-    // Calcula v conforme EIP-155: v = rec_id + (chainId * 2 + 35)
-    // Onde rec_id é 0 ou 1
-    int v = rec_id + (chainId * 2) + 35;
-
-    return v;
-}
 
 
 
